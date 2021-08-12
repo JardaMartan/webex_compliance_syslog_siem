@@ -1,0 +1,27 @@
+development database (dynamodb):
+docker run -p 8000:8000 --name wxt_dynamodb amazon/dynamodb-local
+
+Flask:
+dotenv -f .env_local run python wxt_compliance.py
+dotenv -f .env_local run python wxt_compliance.py -vv -u compliance-admin@jmartan.pregasandbox.co -cm
+
+Tests:
+python -m unittest test_button_bot.BotTest.test_create_registration_form
+
+PIP update:
+pip list --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1  | xargs -n1 pip install -U
+
+
+docker:
+docker network create --driver bridge webex_compliance
+docker run --network webex_compliance --name webex_compliance_db amazon/dynamodb-local
+
+
+docker cleanup:
+docker rm $(docker ps -aqf status=exited)
+docker kill $(docker ps -aq)
+docker rmi $(docker images -q)
+
+docker test:
+docker run -d --network webex_compliance --name webex_compliance_db -v /tmp/data:/data/ amazon/dynamodb-local -dbPath /data/
+docker run -d --network webex_compliance --name webex_compliance_db amazon/dynamodb-local

@@ -1,0 +1,42 @@
+version: "3.9"
+
+networks:
+  wx_net:
+    name: wx_net
+    
+volumes:  
+  dynamodb-data:
+    driver: local
+
+services: 
+  webex_compliance:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: dotenv -f .env_docker run python wxt_compliance.py -vv -cm
+    container_name: app
+    depends_on:
+      - dynamodb
+    ports:
+      - "5050:5050"
+    environment:
+      PYTHONUNBUFFERED: 'true'
+    env_file:
+      - '.env_docker'
+    restart: always
+    networks:
+      - wx_net
+    image: jardamartan/wx_compliance
+
+  dynamodb:
+    build:
+      context: .
+      dockerfile: Dockerfile-dynamo
+    image: dynamo
+    container_name: dynamodb
+    command: -jar DynamoDBLocal.jar -sharedDb -dbPath /home/dynamodblocal/data
+    restart: always
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    networks:
+      - wx_net
