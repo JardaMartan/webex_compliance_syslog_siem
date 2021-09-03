@@ -13,7 +13,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: dotenv -f .env_docker run python wxt_compliance.py -vv -cm
+    command: python wxt_compliance.py -vv -cm
     container_name: app
     depends_on:
       - dynamodb
@@ -21,6 +21,12 @@ services:
       - "5050:5050"
     environment:
       PYTHONUNBUFFERED: 'true'
+      SYSLOG_SERVERS: "127.0.0.1:514/udp"
+      SYSLOG_FACILITY: "network"
+      SYSLOG_SEVERITY: "info"
+      # WEBEX_INTEGRATION_ID: "paste_your_integration_id_here"
+      # WEBEX_INTEGRATION_CLIENT_ID: "paste_your_integration_client_id_here"
+      # WEBEX_INTEGRATION_CLIENT_SECRET: "paste_your_integration_client_secret_here"
     env_file:
       - '.env_docker'
     restart: always
