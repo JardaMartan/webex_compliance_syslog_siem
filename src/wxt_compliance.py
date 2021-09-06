@@ -319,6 +319,7 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_ad
     
     from_time = datetime.utcnow()
     while True:
+        # TODO: load latest timestamp 
         try:
         # flask_app.logger.debug("Check events tick.")
 
@@ -400,6 +401,7 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_ad
             flask_app.logger.error("Loop excepion: {}".format(e))        
 
         finally:
+            # TODO: save timestamp
             time.sleep(check_interval)
         
 def create_syslog_client(syslog_cfg):
