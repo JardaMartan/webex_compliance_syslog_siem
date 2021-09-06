@@ -60,6 +60,8 @@ STATE_CHECK = "webex is great" # integrity test phrase
 EVENT_CHECK_INTERVAL = 15
 SAFE_TOKEN_DELTA = 3600 # safety seconds before access token expires - renew if smaller
 
+TIMESTAMP_KEY = "LAST_CHECK"
+
 def sigterm_handler(_signo, _stack_frame):
     "When sysvinit sends the TERM signal, cleanup before exiting."
 
@@ -141,6 +143,20 @@ def refresh_tokens_for_key(token_key):
         
     return "Tokens refreshed for {}".format(token_key)
     
+def save_timestamp(timestamp_key, timestamp):
+    ddb.save_db_record(timestamp_key, "TIMESTAMP", str(timestamp))
+    
+def load_timestamp(timestamp_key):
+    db_timestamp = ddb.get_db_record(timestamp_key, "TIMESTAMP")
+    flask_app.logger.debug("Loaded timestamp from db: {}".format(db_timestamp))
+    
+    try:
+        res = float(db_timestamp["pvalue"])
+        return res
+    except Exception as e:
+        flask_app.logger.debug("timestamp exception: {}".format(e))
+        return None
+
 # Flask part of the code
 
 """
@@ -317,9 +333,15 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_ad
             
     flask_app.logger.info("Syslog facility: {}, severity: {}".format(syslog_facility, syslog_severity))
     
-    from_time = datetime.utcnow()
+    # load last timestamp from DB
+    last_timestamp = load_timestamp(TIMESTAMP_KEY)
+    
+    if last_timestamp is None:
+        from_time = datetime.utcnow()
+    else:
+        from_time = datetime.fromtimestamp(last_timestamp)
+        
     while True:
-        # TODO: load latest timestamp 
         try:
         # flask_app.logger.debug("Check events tick.")
 
@@ -401,7 +423,8 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_ad
             flask_app.logger.error("Loop excepion: {}".format(e))        
 
         finally:
-            # TODO: save timestamp
+            # save timestamp
+            save_timestamp(TIMESTAMP_KEY, to_time.timestamp())
             time.sleep(check_interval)
         
 def create_syslog_client(syslog_cfg):
