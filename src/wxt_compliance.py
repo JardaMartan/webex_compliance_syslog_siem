@@ -382,10 +382,10 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_ad
                     wxt_client = WebexTeamsAPI(access_token=tokens.access_token)
                     new_client = True
 
+            to_time = datetime.utcnow()
         # query the Events API        
             if wxt_client:
                 try:
-                    to_time = datetime.utcnow()
                     from_stamp = from_time.isoformat(timespec="milliseconds")+"Z"
                     to_stamp = to_time.isoformat(timespec="milliseconds")+"Z"
                     flask_app.logger.debug("check interval {} - {}".format(from_stamp, to_stamp))
