@@ -681,7 +681,7 @@ Started: {}
 Up: {}
 
 Event statistics
-Total events: {}
+Total user events: {}
 Total admin events: {}
 Maximum processing time: {:0.2f}s at {}
 {}
