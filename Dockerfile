@@ -16,4 +16,5 @@ COPY .env_docker .env
 COPY src/ .
 
 # command to run on container start
-CMD [ "dotenv", "-f", ".env_docker", "run", "python", "wxt_compliance.py", "-vv", "-cm" ]
+# CMD [ "dotenv", "-f", ".env_docker", "run", "python", "wxt_compliance.py", "-vv", "-cm" ]
+CMD [ "wxt_compliance.py", "-vv", "-cm" ]
