@@ -1,0 +1,13 @@
+{
+  "actors": [
+    "petra@perlovka.guru",
+    "user1@jmartan.pregasandbox.co",
+    "jakub@perlovka.guru",
+    "admin@jmartan.webexsandbox.co"
+  ],
+  "options": {
+    "check_actor": false,
+    "wxt_compliance": true,
+    "wxt_admin_audit": true
+  }
+}

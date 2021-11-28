@@ -1,12 +1,11 @@
-version: "3.9"
+version: "2"
 
 networks:
-  wx_net:
-    name: wx_net
+  siem_net:
+    # name: siem_net
     
-volumes:  
-  dynamodb-data:
-    driver: local
+volumes:
+  token-storage:
 
 services: 
   webex_compliance:
@@ -14,16 +13,18 @@ services:
       context: .
       dockerfile: Dockerfile
     command: python wxt_compliance.py -vv -cm
-    container_name: app
-    depends_on:
-      - dynamodb
+    container_name: webex_siem
     ports:
-      - "5050:5050"
+      - "5443:5050"
     environment:
       PYTHONUNBUFFERED: 'true'
+      CURL_CA_BUNDLE: ''
+      LOG_LEVEL: 'DEBUG'
       # comma separated list of servers, formats:
       # hostname_or_ip:port/protocol, hostname_or_ip:port, hostname_or_ip
       SYSLOG_SERVERS: "127.0.0.1:514/udp"
+      REDIRECT_URI: "your_webex_redirect_uri" # default: "https://localhost:5443/manager"
+
       # syslog facility, values:
       # CLOCK, CLOCK2, FTP, KERNEL, LOCAL0, LOCAL1, LOCAL2, LOCAL3, LOCAL4, LOCAL5, LOCAL6, LOCAL7,
       # LOG_ALERT, LOG_AUDIT, MAIL, NETWORK, NTP, PRINTER, SECURITY, SYSLOG, SYSTEM, USER, UUCP
@@ -31,25 +32,14 @@ services:
       # syslog severity, values:
       # ALERT, CRITICAL, DEBUG, EMERGENCY, ERROR, INFO, NOTICE, WARNING
       SYSLOG_SEVERITY: "info"
-      # WEBEX_INTEGRATION_ID: "paste_your_integration_id_here"
-      # WEBEX_INTEGRATION_CLIENT_ID: "paste_your_integration_client_id_here"
-      # WEBEX_INTEGRATION_CLIENT_SECRET: "paste_your_integration_client_secret_here"
-    env_file:
-      - '.env_docker'
+      WEBEX_INTEGRATION_ID: "paste_your_integration_id_here"
+      WEBEX_INTEGRATION_CLIENT_ID: "paste_your_integration_client_id_here"
+      WEBEX_INTEGRATION_CLIENT_SECRET: "paste_your_integration_client_secret_here"
     restart: always
     networks:
-      - wx_net
+      - siem_net
     image: jardamartan/wx_compliance
-
-  dynamodb:
-    build:
-      context: .
-      dockerfile: Dockerfile-dynamo
-    image: dynamo
-    container_name: dynamodb
-    command: -jar DynamoDBLocal.jar -sharedDb -dbPath /home/dynamodblocal/data
-    restart: always
     volumes:
-      - dynamodb-data:/home/dynamodblocal/data
-    networks:
-      - wx_net
+      - ./config:/config:z # ":z" avoids permission error in SELinux, see: https://blog.cyplo.dev/posts/2016/12/using-ad-hoc-docker-volumes-on-selinux-enabled-systems/
+      - ./log:/log:z
+      - token-storage:/token_storage/data

@@ -4,6 +4,7 @@ import os
 import sys
 import uuid
 import logging
+import coloredlogs
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
@@ -12,16 +13,14 @@ from urllib.parse import urlparse, quote
 from webexteamssdk import WebexTeamsAPI, ApiError, AccessToken
 webex_api = WebexTeamsAPI(access_token="12345")
 
-import boto3
-from ddb_single_table_obj import DDB_Single_Table
-
 import json, requests
 from datetime import datetime, timedelta, timezone
 import time
-from flask import Flask, request, redirect, url_for
+from flask import Flask, request, redirect, url_for, make_response
 
 import re
 import pysyslogclient
+import base64
 
 import concurrent.futures
 import signal
@@ -30,9 +29,20 @@ flask_app = Flask(__name__)
 flask_app.config["DEBUG"] = True
 requests.packages.urllib3.disable_warnings()
 
-logger = logging.getLogger()
-
-ddb = None
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  [%(levelname)7s]  [%(module)s.%(name)s.%(funcName)s]:%(lineno)s %(message)s",
+    handlers=[
+        logging.FileHandler("/log/debug.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+coloredlogs.install(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    fmt="%(asctime)s  [%(levelname)7s]  [%(module)s.%(name)s.%(funcName)s]:%(lineno)s %(message)s",
+    logger=logger
+)
 
 ADMIN_SCOPE = ["audit:events_read"]
 
@@ -62,10 +72,14 @@ SAFE_TOKEN_DELTA = 3600 # safety seconds before access token expires - renew if 
 
 TIMESTAMP_KEY = "LAST_CHECK"
 
+STORAGE_PATH = "/token_storage/data/"
+WEBEX_TOKEN_FILE = "webex_tokens_{}.json"
+TIMESTAMP_FILE = "timestamp_{}.json"
+
 def sigterm_handler(_signo, _stack_frame):
     "When sysvinit sends the TERM signal, cleanup before exiting."
 
-    flask_app.logger.info("Received signal {}, exiting...".format(_signo))
+    logger.info("Received signal {}, exiting...".format(_signo))
     
     thread_executor._threads.clear()
     concurrent.futures.thread._threads_queues.clear()
@@ -77,22 +91,49 @@ signal.signal(signal.SIGINT, sigterm_handler)
 thread_executor = concurrent.futures.ThreadPoolExecutor()
 wxt_username = "COMPLIANCE"
 wxt_token_key = "COMPLIANCE"
-wxt_resource = None
-wxt_type = None
-wxt_actor_email = None
-wxt_admin_audit = False
-wxt_compliance = False
 token_refreshed = False
 
+options = {
+    "wxt_compliance": False,
+    "wxt_admin_audit": False,
+    "wxt_resource": None,
+    "wxt_type": None,
+    "check_actor": False,
+    "skip_timestamp": False
+}
+
+# statistics
+statistics = {
+    "started": datetime.utcnow(),
+    "events": 0,
+    "admin_events": 0,
+    "max_time": 0,
+    "max_time_at": datetime.now(),
+    "resources": {},
+    "admin": {}
+}
+
 class AccessTokenAbs(AccessToken):
+    """
+    Store Access Token with a real timestamp.
+    
+    Access Tokens are generated with 'expires-in' information. In order to store them
+    it's better to have a real expiration date and time. Timestamps are saved in UTC.
+    Note that Refresh Token expiration is not important. As long as it's being used
+    to generate new Access Tokens, its validity is extended even beyond the original expiration date.
+    
+    Attributes:
+        expires_at (float): When the access token expires
+        refresh_token_expires_at (float): When the refresh token expires.
+    """
     def __init__(self, access_token_json):
         super().__init__(access_token_json)
         if not "expires_at" in self._json_data.keys():
             self._json_data["expires_at"] = str((datetime.now(timezone.utc) + timedelta(seconds = self.expires_in)).timestamp())
-        flask_app.logger.debug("Access Token expires in: {}s, at: {}".format(self.expires_in, self.expires_at))
+        logger.debug("Access Token expires in: {}s, at: {}".format(self.expires_in, self.expires_at))
         if not "refresh_token_expires_at" in self._json_data.keys():
             self._json_data["refresh_token_expires_at"] = str((datetime.now(timezone.utc) + timedelta(seconds = self.refresh_token_expires_in)).timestamp())
-        flask_app.logger.debug("Refresh Token expires in: {}s, at: {}".format(self.refresh_token_expires_in, self.refresh_token_expires_at))
+        logger.debug("Refresh Token expires in: {}s, at: {}".format(self.refresh_token_expires_in, self.refresh_token_expires_at))
         
     @property
     def expires_at(self):
@@ -103,32 +144,66 @@ class AccessTokenAbs(AccessToken):
         return self._json_data["refresh_token_expires_at"]
 
 def save_tokens(token_key, tokens):
+    """
+    Save tokens.
+    
+    Parameters:
+        tokens (AccessTokenAbs): Access & Refresh Token object
+    """
     global token_refreshed
     
-    flask_app.logger.debug("AT timestamp: {}".format(tokens.expires_at))
+    logger.debug("AT timestamp: {}".format(tokens.expires_at))
     token_record = {
         "access_token": tokens.access_token,
         "refresh_token": tokens.refresh_token,
         "expires_at": tokens.expires_at,
         "refresh_token_expires_at": tokens.refresh_token_expires_at
     }
-    ddb.save_db_record(token_key, "TOKENS", str(tokens.expires_at), **token_record)
+    file_destination = get_webex_token_file(token_key)
+    with open(file_destination, "w") as file:
+        logger.debug("Saving Webex tokens to: {}".format(file_destination))
+        json.dump(token_record, file)
     
-    token_refreshed = True
+    token_refreshed = True # indicate to the main loop that the Webex token has been refreshed
+    
+def get_webex_token_file(token_key):
+    return STORAGE_PATH + WEBEX_TOKEN_FILE.format(token_key)
     
 def get_tokens_for_key(token_key):
-    db_tokens = ddb.get_db_record(token_key, "TOKENS")
-    flask_app.logger.debug("Loaded tokens from db: {}".format(db_tokens))
+    """
+    Load tokens.
     
-    if db_tokens:
-        tokens = AccessTokenAbs(db_tokens)
-        flask_app.logger.debug("Got tokens: {}".format(tokens))
-        return tokens
-    else:
-        flask_app.logger.error("No tokens for key {}.".format(token_key))
+    Parameters:
+        token_key (str): A key to the storage of the token
+        
+    Returns:
+        AccessTokenAbs: Access & Refresh Token object or None
+    """
+    try:
+        file_source = get_webex_token_file(token_key)
+        with open(file_source, "r") as file:
+            logger.debug("Loading Webex tokens from: {}".format(file_source))
+            token_data = json.load(file)
+            tokens = AccessTokenAbs(token_data)
+            return tokens
+    except Exception as e:
+        logger.info("Webex token load exception: {}".format(e))
         return None
 
 def refresh_tokens_for_key(token_key):
+    """
+    Run the Webex 'get new token by using refresh token' operation.
+    
+    Get new Access Token. Note that the expiration of the Refresh Token is automatically
+    extended no matter if it's indicated. So if this operation is run regularly within
+    the time limits of the Refresh Token (typically 3 months), the Refresh Token never expires.
+    
+    Parameters:
+        token_key (str): A key to the storage of the token
+        
+    Returns:
+        str: message indicating the result of the operation
+    """
     tokens = get_tokens_for_key(token_key)
     client_id = os.getenv("WEBEX_INTEGRATION_CLIENT_ID")
     client_secret = os.getenv("WEBEX_INTEGRATION_CLIENT_SECRET")
@@ -136,26 +211,66 @@ def refresh_tokens_for_key(token_key):
     try:
         new_tokens = AccessTokenAbs(integration_api.access_tokens.refresh(client_id, client_secret, tokens.refresh_token).json_data)
         save_tokens(token_key, new_tokens)
-        flask_app.logger.info("Tokens refreshed for key {}".format(token_key))
+        logger.info("Tokens refreshed for key {}".format(token_key))
     except ApiError as e:
-        flask_app.logger.error("Client Id and Secret loading error: {}".format(e))
+        logger.error("Client Id and Secret loading error: {}".format(e))
         return "Error refreshing an access token. Client Id and Secret loading error: {}".format(e)
         
     return "Tokens refreshed for {}".format(token_key)
-    
+
 def save_timestamp(timestamp_key, timestamp):
-    ddb.save_db_record(timestamp_key, "TIMESTAMP", str(timestamp))
+    """
+    Save a timestamp.
+    
+    Parameters:
+        timestamp_key (str): storage key for the timestamp
+        timestamp (float): datetime timestamp
+    """
+    timestamp_destination = get_timestamp_file(timestamp_key)
+    logger.debug("Saving timestamp to {}".format(timestamp_destination))
+    with open(timestamp_destination, "w") as file:
+        json.dump({"timestamp": timestamp}, file)
     
 def load_timestamp(timestamp_key):
-    db_timestamp = ddb.get_db_record(timestamp_key, "TIMESTAMP")
-    flask_app.logger.debug("Loaded timestamp from db: {}".format(db_timestamp))
+    """
+    Save a timestamp.
     
+    Parameters:
+        timestamp_key (str): storage key for the timestamp
+        
+    Returns:
+        float: timestamp for datetime
+    """
+    timestamp_source = get_timestamp_file(timestamp_key)
+    logger.debug("Loading timestamp from {}".format(timestamp_source))
     try:
-        res = float(db_timestamp["pvalue"])
-        return res
+        with open(timestamp_source, "r") as file:
+            ts = json.load(file)
+            return float(ts.get("timestamp"))
     except Exception as e:
-        flask_app.logger.debug("timestamp exception: {}".format(e))
+        logger.info("Timestamp load exception: {}".format(e))
         return None
+            
+def get_timestamp_file(timestamp_key):
+    return STORAGE_PATH + TIMESTAMP_FILE.format(timestamp_key)
+    
+def load_config(options):
+    """
+    Load the configuration file.
+    
+    Returns:
+        dict: configuration file JSON
+    """
+    with open("/config/config.json") as file:
+        config = json.load(file)
+    
+    opt = config.get("options", {})
+    for key, value in opt.items():
+        options[key] = value
+    return config
+    
+def secure_scheme(scheme):
+    return re.sub(r"^http$", "https", scheme)
 
 # Flask part of the code
 
@@ -165,18 +280,15 @@ def load_timestamp(timestamp_key):
 """
 @flask_app.before_first_request
 def startup():
-    global ddb
-    
-    ddb = DDB_Single_Table()
-    flask_app.logger.debug("initialize DDB object {}".format(ddb))
-        
-    flask_app.logger.debug("Starting event check...")
+    logger.debug("Starting event check...")
     # check_events(EVENT_CHECK_INTERVAL, wxt_compliance, wxt_admin_audit, wxt_resource, wxt_type, wxt_actor_email)
-    thread_executor.submit(check_events, EVENT_CHECK_INTERVAL, wxt_compliance, wxt_admin_audit, wxt_resource, wxt_type, wxt_actor_email)
+    thread_executor.submit(check_events, EVENT_CHECK_INTERVAL)
 
 @flask_app.route("/")
 def hello():
-    return "Hello World!"
+    response = make_response(format_event_stats(), 200)
+    response.mimetype = "text/plain"
+    return response
 
 """
 OAuth proccess done
@@ -195,7 +307,7 @@ def authorize():
     full_redirect_uri = os.getenv("REDIRECT_URI")
     if full_redirect_uri is None:
         full_redirect_uri = myUrlParts.scheme + "://" + myUrlParts.netloc + url_for("manager")
-    flask_app.logger.info("Authorize redirect URL: {}".format(full_redirect_uri))
+    logger.info("Authorize redirect URL: {}".format(full_redirect_uri))
 
     client_id = os.getenv("WEBEX_INTEGRATION_CLIENT_ID")
     redirect_uri = quote(full_redirect_uri, safe="")
@@ -222,61 +334,37 @@ def manager():
         
     input_code = request.args.get("code")
     check_phrase = request.args.get("state")
-    flask_app.logger.debug("Authorization request \"state\": {}, code: {}".format(check_phrase, input_code))
+    logger.debug("Authorization request \"state\": {}, code: {}".format(check_phrase, input_code))
 
     myUrlParts = urlparse(request.url)
     full_redirect_uri = os.getenv("REDIRECT_URI")
     if full_redirect_uri is None:
         full_redirect_uri = myUrlParts.scheme + "://" + myUrlParts.netloc + url_for("manager")
-    flask_app.logger.debug("Manager redirect URI: {}".format(full_redirect_uri))
+    logger.debug("Manager redirect URI: {}".format(full_redirect_uri))
     
     try:
         client_id = os.getenv("WEBEX_INTEGRATION_CLIENT_ID")
         client_secret = os.getenv("WEBEX_INTEGRATION_CLIENT_SECRET")
         tokens = AccessTokenAbs(webex_api.access_tokens.get(client_id, client_secret, input_code, full_redirect_uri).json_data)
-        flask_app.logger.debug("Access info: {}".format(tokens))
+        logger.debug("Access info: {}".format(tokens))
     except ApiError as e:
-        flask_app.logger.error("Client Id and Secret loading error: {}".format(e))
+        logger.error("Client Id and Secret loading error: {}".format(e))
         return "Error issuing an access token. Client Id and Secret loading error: {}".format(e)
         
     webex_integration_api = WebexTeamsAPI(access_token=tokens.access_token)
     try:
         user_info = webex_integration_api.people.me()
-        flask_app.logger.debug("Got user info: {}".format(user_info))
+        logger.debug("Got user info: {}".format(user_info))
         wxt_username = user_info.emails[0]
         save_tokens(wxt_token_key, tokens)
         
         ## TODO: add periodic access token refresh
     except ApiError as e:
-        flask_app.logger.error("Error getting user information: {}".format(e))
+        logger.error("Error getting user information: {}".format(e))
         return "Error getting your user information: {}".format(e)
         
     return redirect(url_for("authdone"))
     
-"""
-Manual token refresh of a single user. Not needed if the thread is running.
-"""
-@flask_app.route("/tokenrefresh", methods=["GET"])
-def token_refresh():
-    token_key = request.args.get("token_key")
-    if token_key is None:
-        return "Please provide a user id"
-    
-    return refresh_tokens_for_key(token_key)
-    
-"""
-Manual token refresh of all users. Not needed if the thread is running.
-"""
-@flask_app.route("/tokenrefreshall", methods=["GET"])
-def token_refresh_all():
-    results = ""
-    user_tokens = ddb.get_db_record_by_secondary_key("TOKENS")
-    for token in user_tokens:
-        flask_app.logger.debug("Refreshing: {} token".format(token["pk"]))
-        results += refresh_tokens_for_key(token["pk"])+"\n"
-    
-    return results
-
 # TODO: manual query of events API
 @flask_app.route("/queryevents", methods=["GET"])
 def query_events():
@@ -290,18 +378,18 @@ Doesn't work until "wxt_username" runs through OAuth grant flow above.
 Access token is automatically refreshed if needed using Refresh Token.
 No additional user authentication is required.
 """
-def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_admin_audit=False, wx_resource=None, wx_type=None, wx_actor_email=None):
-    global token_refreshed
+def check_events(check_interval=EVENT_CHECK_INTERVAL):
+    global token_refreshed, options, statistics
     
     tokens = None
     wxt_client = None
     
     xargs = {}
-    if wx_resource is not None:
-        xargs["resource"] = wx_resource
-    if wx_type is not None:
-        xargs["type"] = wx_type
-    flask_app.logger.debug("Additional args: {}".format(xargs))
+    if options["wxt_resource"] is not None:
+        xargs["resource"] = options["wxt_resource"]
+    if options["wxt_type"] is not None:
+        xargs["type"] = options["wxt_type"]
+    logger.debug("Additional args: {}".format(xargs))
     
     syslog_config = os.getenv("SYSLOG_SERVERS")
     syslog_server_list = syslog_config.replace(" ", "").split(",")
@@ -316,25 +404,29 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_ad
     syslog_fac_config = os.getenv("SYSLOG_FACILITY")
     if syslog_fac_config:
         search_fac = "FAC_" + syslog_fac_config.upper()
-        flask_app.logger.debug("Searching facility: {}".format(search_fac))
+        logger.debug("Searching facility: {}".format(search_fac))
         try:
             syslog_facility = getattr(pysyslogclient, search_fac)
         except AttributeError as e:
-            flask_app.logger.info("Facility not found: {}".format(e))
+            logger.info("Facility not found: {}".format(e))
             
     syslog_sev_config = os.getenv("SYSLOG_SEVERITY")
     if syslog_sev_config:
         search_sev = "SEV_" + syslog_sev_config.upper()
-        flask_app.logger.debug("Searching severity: {}".format(search_sev))
+        logger.debug("Searching severity: {}".format(search_sev))
         try:
             syslog_severity = getattr(pysyslogclient, search_sev)
         except AttributeError as e:
-            flask_app.logger.info("Severity not found: {}".format(e))
+            logger.info("Severity not found: {}".format(e))
             
-    flask_app.logger.info("Syslog facility: {}, severity: {}".format(syslog_facility, syslog_severity))
+    logger.info("Syslog facility: {}, severity: {}".format(syslog_facility, syslog_severity))
     
-    # load last timestamp from DB
-    last_timestamp = load_timestamp(TIMESTAMP_KEY)
+    # check events from the last saved timestamp or from the application start
+    if options["skip_timestamp"]:
+        last_timestamp = None
+    else:
+        # load last timestamp from DB
+        last_timestamp = load_timestamp(TIMESTAMP_KEY)
     
     if last_timestamp is None:
         from_time = datetime.utcnow()
@@ -343,7 +435,7 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_ad
         
     while True:
         try:
-        # flask_app.logger.debug("Check events tick.")
+        # logger.debug("Check events tick.")
 
 # check for token until there is one available in the DB        
             if tokens is None or token_refreshed:
@@ -351,32 +443,23 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_ad
                 if tokens:
                     wxt_client = WebexTeamsAPI(access_token=tokens.access_token)
 
-        # get actorId if required
-                    if wx_actor_email is not None:
-                        try:
-                            wx_actor_list = wxt_client.people.list(email=wx_actor_email)
-                            for person in wx_actor_list:
-                                xargs["actorId"] = person.id
-                        except ApiError as e:
-                            flask_app.logger.error("People list API request error: {}".format(e))
-                    
                     try:
                         user_info = wxt_client.people.me()
-                        flask_app.logger.debug("Got user info: {}".format(user_info))
+                        logger.debug("Got user info: {}".format(user_info))
                         wx_org_id = user_info.orgId
                     except ApiError as e:
-                        flask_app.logger.error("Me request error: {}".format(e))
+                        logger.error("Me request error: {}".format(e))
 
                     token_refreshed = False
                 else:
-                    flask_app.logger.error("No access tokens for key {}. Authorize the user first.".format(wxt_token_key))
+                    logger.error("No access tokens for key {}. Authorize the user first.".format(wxt_token_key))
                     
             if tokens:
         # renew access token using refresh token if needed
-                # flask_app.logger.info("tokens: {}".format(tokens))
+                # logger.info("tokens: {}".format(tokens))
                 token_delta = datetime.fromtimestamp(float(tokens.expires_at)) - datetime.utcnow()
                 if token_delta.total_seconds() < SAFE_TOKEN_DELTA:
-                    flask_app.logger.info("Access token is about to expire, renewing...")
+                    logger.info("Access token is about to expire, renewing...")
                     refresh_tokens_for_key(wxt_token_key)
                     tokens = get_tokens_for_key(wxt_token_key)
                     wxt_client = WebexTeamsAPI(access_token=tokens.access_token)
@@ -388,20 +471,16 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_ad
                 try:
                     from_stamp = from_time.isoformat(timespec="milliseconds")+"Z"
                     to_stamp = to_time.isoformat(timespec="milliseconds")+"Z"
-                    flask_app.logger.debug("check interval {} - {}".format(from_stamp, to_stamp))
-                    if wx_compliance:
+                    logger.debug("check interval {} - {}".format(from_stamp, to_stamp))
+                    config = load_config(options)
+                    if options["wxt_compliance"]:
                         event_list = wxt_client.events.list(_from=from_stamp, to=to_stamp, **xargs)
                         for event in event_list:
-                            actor = wxt_client.people.get(event.actorId)
-                            
-                            # TODO: information logging to an external system
-                            syslog_msg = "{} {} {} {} by {} JSON: {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0], json.dumps(event.json_data))
-                            flask_app.logger.info("{} {} {} {} by {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0]))
-                            send_syslog(syslog_list, syslog_msg, facility = syslog_facility, severity = syslog_severity)
-                            
-                    if wx_admin_audit:
+                            handle_event(event, wxt_client, syslog_list, syslog_facility, syslog_severity, options, config)
+                                                        
+                    if options["wxt_admin_audit"]:
                         # get admin audit events
-                        # flask_app.logger.info("admin audit request, org id: {}".format(wx_org_id))
+                        # logger.info("admin audit request, org id: {}".format(wx_org_id))
                         #
                         # the user who authorized the access needs to:
                         # 1. be Full Administrator (cannot be Read-Only Admin)
@@ -409,24 +488,93 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL, wx_compliance=False, wx_ad
                         #
                         admin_audit_list = wxt_client.admin_audit_events.list(wx_org_id, _from=from_stamp, to=to_stamp)
                         for event in admin_audit_list:
-                            # TODO: information logging to an external system
-                            audit_data = event.data
-                            syslog_msg = "{} {} {} {} by {} JSON: {}".format(event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail, json.dumps(event.json_data))
-                            # flask_app.logger.info("{} {} {} {} by {}".format(event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail))
-                            flask_app.logger.info("admin audit event: {}".format(syslog_msg))
-                            send_syslog(syslog_list, syslog_msg, facility = syslog_facility, severity = syslog_severity)
+                            logger.debug(f"Admin audit event: {event}")
+                            handle_admin_event(event, wxt_client, syslog_list, syslog_facility, syslog_severity, options, config)
                     from_time = to_time
                 except ApiError as e:
-                    flask_app.logger.error("Admin audit API request error: {}".format(e))
+                    logger.error("Admin audit API request error: {}".format(e))
                     
-        except Exception as e:
-            flask_app.logger.error("Loop excepion: {}".format(e))        
-
-        finally:
             # save timestamp
             save_timestamp(TIMESTAMP_KEY, to_time.timestamp())
+            now_check = datetime.utcnow()
+            diff = (now_check - to_time).total_seconds()
+            logger.info("event processing took {} seconds".format(diff))
+            if diff > statistics["max_time"]:
+                statistics["max_time"] = diff
+                statistics["max_time_at"] = datetime.now()
+            if diff < check_interval:
+                time.sleep(check_interval - int(diff))
+            else:
+                logger.error("EVENT PROCESSING IS TAKING TOO LONG ({}), PERFORMANCE IMPROVEMENT NEEDED".format(diff))
+        except Exception as e:
+            logger.error("check_events() loop exception: {}".format(e))
             time.sleep(check_interval)
+        finally:
+            pass
+            
+def handle_event(event, wxt_client, syslog_list, syslog_facility, syslog_severity, options, config):
+    """
+    Handle Webex Events API query result
+    """
+    try:
+        passed, actor = actor_passed(wxt_client, event.actorId, options, config)
+        if not passed:
+            return
+
+        save_event_stats(event)
+
+        event_data = event.json_data
+        # logger.debug(f"event: {event_data}")
+        try:
+            event_data["data"].pop("text", None)
+        except Exception as e:
+            logger.debug(f"Pop exception: {e}")
+        syslog_msg = "{} {} {} {} by {} JSON: {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0], json.dumps(event_data))
+        # logger.info("{} {} {} {} by {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0]))
+        logger.info(f"syslog message: {syslog_msg}")
+        send_syslog(syslog_list, syslog_msg, facility = syslog_facility, severity = syslog_severity)
+
+    except Exception as e:
+        logger.error("handle_event() exception: {}".format(e))
         
+def handle_admin_event(admin_event, wxt_client, syslog_list, syslog_facility, syslog_severity, options, config):
+    """
+    Handle Webex Admin Audit Events API query result
+    """
+    try:
+        passed, actor = actor_passed(wxt_client, admin_event.actorId, options, config)
+        if not passed:
+            return
+
+        save_admin_event_stats(admin_event)
+
+        audit_data = admin_event.data
+        syslog_msg = "{} {} {} {} by {} JSON: {}".format(admin_event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail, json.dumps(admin_event.json_data))
+        # logger.info("{} {} {} {} by {}".format(event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail))
+        logger.info("admin audit event: {}".format(syslog_msg))
+        send_syslog(syslog_list, syslog_msg, facility = syslog_facility, severity = syslog_severity)
+    except Exception as e:
+        logger.error("handle_admin_event() exception: {}".format(e))
+
+def actor_passed(wxt_client, actor_id, options, config):
+    logger.debug(f"checking actor: {actor_id}")
+    actor_id_decoded = base64.b64decode(actor_id + '=' * (-len(actor_id) % 4))
+    actor_uuid = actor_id_decoded.decode("ascii").split("/")[-1] # uuid is the last element of actor id
+    logger.debug(f"actor uuid: {actor_uuid}")
+    full_actor_id = base64.b64encode(f"ciscospark://us/PEOPLE/{actor_uuid}".encode("ascii")).decode("ascii").rstrip("=")
+    logger.debug(f"actor id: {full_actor_id}")
+    actor = wxt_client.people.get(full_actor_id)
+
+    if options["check_actor"]:
+
+        actor_list = config.get("actors")
+        logger.debug("configured actors: {}".format(actor_list))
+        if not any(actor.emails[0].lower() in act_member.lower() for act_member in actor_list):
+            logger.info("{} ({}) not in configured actor list".format(actor.displayName, actor.emails[0]))
+            return False, actor
+    
+    return True, actor
+            
 def create_syslog_client(syslog_cfg):
     match = re.match(r"(.*):(.*)/(tcp|udp)", syslog_cfg) # hostname:port/protocol
     protocol = "UDP"
@@ -444,12 +592,102 @@ def create_syslog_client(syslog_cfg):
         port = match.group(2)
         protocol = match.group(3).upper()
         
-    flask_app.logger.info("Creating syslog client {}:{}/{}".format(destination, port, protocol))
+    logger.info("Creating syslog client {}:{}/{}".format(destination, port, protocol))
     return pysyslogclient.SyslogClientRFC5424(destination, port, proto = protocol)
 
 def send_syslog(syslog_client_list, message, facility = pysyslogclient.FAC_LOCAL0, severity = pysyslogclient.SEV_INFO):
     for syslog_client in syslog_client_list:
         syslog_client.log(message, facility = facility, severity = severity)
+
+def save_event_stats(event):
+    """
+    Save statistics
+    
+    Saves statistics to a "statistics" singleton
+    
+    Parameters:
+        event (Event): Event API response object
+    """
+    global statistics
+    
+    statistics["events"] += 1
+    counter_ref = statistics["resources"].get(event.resource)
+    if counter_ref is None:
+        statistics["resources"][event.resource] = {}
+        counter = 0
+    else:
+        counter = counter_ref.get(event.type, 0)
+    counter += 1
+    logger.debug("save_event_stats() counter for {}/{} is now: {}".format(event.resource, event.type, counter))
+    statistics["resources"][event.resource][event.type] = counter
+    
+def save_admin_event_stats(admin_event):
+    """
+    Save statistics
+    
+    Saves statistics to a "statistics" singleton
+    
+    Parameters:
+        admin_event (Event): Admin Event API response object
+    """
+    global statistics
+    
+    event_category = admin_event.data.eventCategory
+    event_type = admin_event.data.targetType
+    logger.debug(f"Admin event {event_category}/{event_type}")
+    statistics["admin_events"] += 1
+    counter_ref = statistics["admin"].get(event_category)
+    if counter_ref is None:
+        statistics["admin"][event_category] = {}
+        counter = 0
+    else:
+        counter = counter_ref.get(event_type, 0)
+    counter += 1
+    logger.debug("save_admin_event_stats() counter for {}/{} is now: {}".format(event_category, event_type, counter))
+    statistics["admin"][event_category][event_type] = counter
+    
+def format_event_stats():
+    """
+    Format event statistics for print
+    
+    Returns:
+        str: formatted statistics
+    """
+    global statistics
+    
+    res_str = "User events\n"
+    for res_key, res_value in statistics["resources"].items():
+        res_str += "{}:\n".format(res_key)
+        for type_key, type_value in statistics["resources"][res_key].items():
+            res_str += "{:<4}{:>14}:{:8d}\n".format("", type_key, type_value)
+    
+    res_str += "\nAdmin audit events\n"
+    for res_key, res_value in statistics["admin"].items():
+        res_str += "{}:\n".format(res_key)
+        for type_key, type_value in statistics["admin"][res_key].items():
+            res_str += "{:<4}{:>14}:{:8d}\n".format("", type_key, type_value)
+
+    start_time = "{:%Y-%m-%d %H:%M:%S GMT}".format(statistics["started"])
+    max_timestamp = "{:%Y-%m-%d %H:%M:%S}".format(statistics["max_time_at"])
+    now = datetime.utcnow()
+    time_diff = now - statistics["started"]
+    hours, remainder = divmod(time_diff.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    diff_time = "{}d {:02d}:{:02d}:{:02d}".format(time_diff.days, int(hours), int(minutes), int(seconds))
+    result = """Webex to SIEM Logger
+
+Started: {}
+Up: {}
+
+Event statistics
+Total events: {}
+Total admin events: {}
+Maximum processing time: {:0.2f}s at {}
+{}
+""".format(start_time, diff_time, statistics["events"], statistics["admin_events"], statistics["max_time"], max_timestamp, res_str)
+    
+    return result
 
 """
 Independent thread startup, see:
@@ -457,17 +695,22 @@ https://networklore.com/start-task-with-flask/
 """
 def start_runner():
     def start_loop():
+        no_proxies = {
+          "http": None,
+          "https": None,
+        }
         not_started = True
         while not_started:
             logger.info('In start loop')
             try:
-                r = requests.get('http://127.0.0.1:5050/')
+                r = requests.get('https://127.0.0.1:5050/', proxies=no_proxies, verify=False)
                 if r.status_code == 200:
                     logger.info('Server started, quiting start_loop')
                     not_started = False
-                logger.debug("Status code: {}".format(r.status_code))
-            except:
-                logger.info('Server not yet started')
+                else:
+                    logger.debug("Status code: {}".format(r.status_code))
+            except Exception as e:
+                logger.info(f'Server not yet started: {e}')
             time.sleep(2)
 
     logger.info('Started runner')
@@ -483,16 +726,16 @@ if __name__ == "__main__":
     #     if default_user is None:
     #         default_user = "COMPLIANCE"
     # 
-    # flask_app.logger.info("Compliance user from env variables: {}".format(default_user))
+    # logger.info("Compliance user from env variables: {}".format(default_user))
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-v', '--verbose', action='count', help="Set logging level by number of -v's, -v=WARN, -vv=INFO, -vvv=DEBUG")
     parser.add_argument("-c", "--compliance", action='store_true', help="Monitor compliance events, default: no")
     parser.add_argument("-m", "--admin", action='store_true', help="Monitor admin audit events, default: no")
-    # parser.add_argument("-u", "--username", type = str, help="Compliance Officer username (e-mail)", default=default_user)
     parser.add_argument("-r", "--resource", type = str, help="Resource type (messages, memberships), default: all")
     parser.add_argument("-t", "--type", type = str, help="Event type (created, updated, deleted), default: all")
-    parser.add_argument("-a", "--actor", type = str, help="Monitored actor id (user's e-mail), default: all")
+    parser.add_argument("-a", "--check_actor", action='store_true', help="Perform actions only if the Webex Event actor is in the \"actors\" list from the /config/config.json file, default: no")
+    parser.add_argument("-s", "--skip_timestamp", action='store_true', help="Ignore stored timestamp and monitor the events just from the application start, default: no")
     
     args = parser.parse_args()
     if args.verbose:
@@ -503,16 +746,19 @@ if __name__ == "__main__":
         if args.verbose > 0:
             logging.basicConfig(level=logging.WARN)
             
-    flask_app.logger.info("Logging level: {}".format(logging.getLogger(__name__).getEffectiveLevel()))
+    logger.info("Logging level: {}".format(logging.getLogger(__name__).getEffectiveLevel()))
     
-    flask_app.logger.info("Using database: {} - {}".format(os.getenv("DYNAMODB_ENDPOINT_URL"), os.getenv("DYNAMODB_TABLE_NAME")))
-    
-    wxt_compliance = args.compliance
-    wxt_admin_audit = args.admin
-    wxt_resource = args.resource
-    wxt_type = args.type
-    wxt_actor_email = args.actor
-    # wxt_username = args.username
+    options["wxt_compliance"] = args.compliance
+    options["wxt_admin_audit"] = args.admin
+    options["wxt_resource"] = args.resource
+    options["wxt_type"] = args.type
+    options["check_actor"] = args.check_actor
+    options["skip_timestamp"] = args.skip_timestamp
         
+    config = load_config(options)
+
+    logger.info("OPTIONS: {}".format(options))
+    logger.info("CONFIG: {}".format(config))
+
     start_runner()
-    flask_app.run(host="0.0.0.0", port=5050)
+    flask_app.run(host="0.0.0.0", port=5050, ssl_context='adhoc')
