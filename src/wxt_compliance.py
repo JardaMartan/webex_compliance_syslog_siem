@@ -67,7 +67,7 @@ MEETINGS_COMPLIANCE_SCOPE = ["spark-compliance:meetings_write"]
 DEFAULT_SCOPE = ["spark:kms"]
 
 STATE_CHECK = "webex is great" # integrity test phrase
-EVENT_CHECK_INTERVAL = 15
+EVENT_CHECK_INTERVAL = 60 # seconds
 SAFE_TOKEN_DELTA = 3600 # safety seconds before access token expires - renew if smaller
 
 TIMESTAMP_KEY = "LAST_CHECK"
