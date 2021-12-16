@@ -530,7 +530,7 @@ def handle_event(event, wxt_client, syslog_list, syslog_facility, syslog_severit
             event_data["data"].pop("text", None)
         except Exception as e:
             logger.debug(f"Pop exception: {e}")
-        syslog_msg = "{} {} {} {} by {} JSON: {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0], json.dumps(event_data))
+        syslog_msg = "{} {} {} {} by {} JSON: {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0], json.dumps(event_data, separators=(",", ":")))
         # logger.info("{} {} {} {} by {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0]))
         logger.info(f"syslog message: {syslog_msg}")
         send_syslog(syslog_list, syslog_msg, facility = syslog_facility, severity = syslog_severity)
