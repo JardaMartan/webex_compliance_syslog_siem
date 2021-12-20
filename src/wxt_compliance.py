@@ -5,6 +5,7 @@ import sys
 import uuid
 import logging
 import coloredlogs
+import inspect
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
@@ -594,11 +595,13 @@ def create_syslog_client(syslog_cfg):
         protocol = match.group(3).upper()
         
     logger.info("Creating syslog client {}:{}/{}".format(destination, port, protocol))
-    return pysyslogclient.SyslogClientRFC5424(destination, port, proto = protocol)
+    # return pysyslogclient.SyslogClientRFC5424(destination, port, proto = protocol)
+    return pysyslogclient.SyslogClientRFC3164(destination, port, proto = protocol)
 
 def send_syslog(syslog_client_list, message, facility = pysyslogclient.FAC_LOCAL0, severity = pysyslogclient.SEV_INFO):
+    progname = os.path.basename(inspect.stack()[-1].filename)
     for syslog_client in syslog_client_list:
-        syslog_client.log(message, facility = facility, severity = severity)
+        syslog_client.log(message, facility = facility, severity = severity, program = progname)
 
 def save_event_stats(event):
     """
