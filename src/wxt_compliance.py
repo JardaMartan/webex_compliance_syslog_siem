@@ -532,10 +532,10 @@ def handle_event(event, wxt_client, syslog_list, syslog_facility, syslog_severit
         except Exception as e:
             logger.debug(f"Pop exception: {e}")
         # syslog_msg = "WEBEX_COMPLIANCE {} {} {} {} by {} JSON: {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0], json.dumps(event_data, separators=(",", ":")))
-        syslog_msg = "WEBEX_COMPLIANCE {} JSON: {}".format(actor.emails[0], json.dumps(event_data, separators=(",", ":")))
+        syslog_msg = "{}: {}".format(actor.emails[0], json.dumps(event_data, separators=(",", ":")))
         # logger.info("{} {} {} {} by {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0]))
         logger.info(f"syslog message: {syslog_msg}")
-        send_syslog(syslog_list, syslog_msg, facility = syslog_facility, severity = syslog_severity)
+        send_syslog(syslog_list, syslog_msg, process_name = "WEBEX_COMPLIANCE", facility = syslog_facility, severity = syslog_severity)
 
     except Exception as e:
         logger.error("handle_event() exception: {}".format(e))
@@ -553,10 +553,10 @@ def handle_admin_event(admin_event, wxt_client, syslog_list, syslog_facility, sy
 
         audit_data = admin_event.data
         # syslog_msg = "WEBEX_ADMIN_AUDIT {} {} {} {} by {} JSON: {}".format(admin_event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail, json.dumps(admin_event.json_data))
-        syslog_msg = "WEBEX_ADMIN_AUDIT {} JSON: {}".format(audit_data.actorEmail, json.dumps(admin_event.json_data["data"]))
+        syslog_msg = "{}: {}".format(audit_data.actorEmail, json.dumps(admin_event.json_data["data"]))
         # logger.info("{} {} {} {} by {}".format(event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail))
         logger.info("admin audit event: {}".format(syslog_msg))
-        send_syslog(syslog_list, syslog_msg, facility = syslog_facility, severity = syslog_severity)
+        send_syslog(syslog_list, syslog_msg, process_name = "WEBEX_ADMIN_AUDIT", facility = syslog_facility, severity = syslog_severity)
     except Exception as e:
         logger.error("handle_admin_event() exception: {}".format(e))
 
@@ -600,10 +600,12 @@ def create_syslog_client(syslog_cfg):
     # return pysyslogclient.SyslogClientRFC5424(destination, port, proto = protocol)
     return pysyslogclient.SyslogClientRFC3164(destination, port, proto = protocol)
 
-def send_syslog(syslog_client_list, message, facility = pysyslogclient.FAC_LOCAL0, severity = pysyslogclient.SEV_INFO):
-    progname = os.path.basename(inspect.stack()[-1].filename)
+def send_syslog(syslog_client_list, message, process_name = None, facility = pysyslogclient.FAC_LOCAL0, severity = pysyslogclient.SEV_INFO):
+    if process_name is None:
+        progname = os.path.basename(inspect.stack()[-1].filename)
+        process_name = os.path.splitext(progname)[0]
     for syslog_client in syslog_client_list:
-        syslog_client.log(message, facility = facility, severity = severity, program = progname)
+        syslog_client.log(message, facility = facility, severity = severity, program = process_name)
 
 def save_event_stats(event):
     """
