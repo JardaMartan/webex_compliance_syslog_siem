@@ -531,7 +531,8 @@ def handle_event(event, wxt_client, syslog_list, syslog_facility, syslog_severit
             event_data["data"].pop("text", None)
         except Exception as e:
             logger.debug(f"Pop exception: {e}")
-        syslog_msg = "WEBEX_COMPLIANCE {} {} {} {} by {} JSON: {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0], json.dumps(event_data, separators=(",", ":")))
+        # syslog_msg = "WEBEX_COMPLIANCE {} {} {} {} by {} JSON: {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0], json.dumps(event_data, separators=(",", ":")))
+        syslog_msg = "WEBEX_COMPLIANCE {} JSON: {}".format(actor.emails[0], json.dumps(event_data, separators=(",", ":")))
         # logger.info("{} {} {} {} by {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0]))
         logger.info(f"syslog message: {syslog_msg}")
         send_syslog(syslog_list, syslog_msg, facility = syslog_facility, severity = syslog_severity)
@@ -551,7 +552,8 @@ def handle_admin_event(admin_event, wxt_client, syslog_list, syslog_facility, sy
         save_admin_event_stats(admin_event)
 
         audit_data = admin_event.data
-        syslog_msg = "WEBEX_ADMIN_AUDIT {} {} {} {} by {} JSON: {}".format(admin_event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail, json.dumps(admin_event.json_data))
+        # syslog_msg = "WEBEX_ADMIN_AUDIT {} {} {} {} by {} JSON: {}".format(admin_event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail, json.dumps(admin_event.json_data))
+        syslog_msg = "WEBEX_ADMIN_AUDIT {} JSON: {}".format(audit_data.actorEmail, json.dumps(admin_event.json_data))
         # logger.info("{} {} {} {} by {}".format(event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail))
         logger.info("admin audit event: {}".format(syslog_msg))
         send_syslog(syslog_list, syslog_msg, facility = syslog_facility, severity = syslog_severity)
