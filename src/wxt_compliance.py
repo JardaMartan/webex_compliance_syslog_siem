@@ -538,8 +538,8 @@ def handle_event(event, wxt_client, syslog_list, syslog_facility, syslog_severit
         syslog_msg = "{}: {}".format(actor.emails[0], json.dumps(event_data, separators=(",", ":")))
         # logger.info("{} {} {} {} by {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0]))
         logger.info(f"syslog message: {syslog_msg}")
-        # send_syslog(syslog_list, syslog_msg, process_name = "WEBEXCOMPLIANCE", facility = syslog_facility, severity = syslog_severity)
-        syslogger.info(syslog_msg)
+        send_syslog(syslog_list, syslog_msg, process_name = "WEBEXCOMPLIANCE", facility = syslog_facility, severity = syslog_severity)
+        # syslogger.info(syslog_msg)
 
     except Exception as e:
         logger.error("handle_event() exception: {}".format(e))
@@ -560,8 +560,8 @@ def handle_admin_event(admin_event, wxt_client, syslog_list, syslog_facility, sy
         syslog_msg = "{}: {}".format(audit_data.actorEmail, json.dumps(admin_event.json_data["data"]))
         # logger.info("{} {} {} {} by {}".format(event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail))
         logger.info("admin audit event: {}".format(syslog_msg))
-        # send_syslog(syslog_list, syslog_msg, process_name = "WEBEXADMINAUDIT", facility = syslog_facility, severity = syslog_severity)
-        syslogger.info(syslog_msg)
+        send_syslog(syslog_list, syslog_msg, process_name = "WEBEXADMINAUDIT", facility = syslog_facility, severity = syslog_severity)
+        # syslogger.info(syslog_msg)
     except Exception as e:
         logger.error("handle_admin_event() exception: {}".format(e))
 
