@@ -47,7 +47,7 @@ coloredlogs.install(
 
 syslogger = logging.getLogger("webexadminaudit")
 # syslogger.addHandler(logging.StreamHandler(sys.stdout))
-syslogger.FileHandler("/log/webex.log")
+syslogger.addHandler(logging.FileHandler("/log/webex.log"))
 
 ADMIN_SCOPE = ["audit:events_read"]
 
