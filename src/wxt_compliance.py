@@ -462,6 +462,7 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL):
                             refresh_tokens_for_key(wxt_token_key)
                             tokens = get_tokens_for_key(wxt_token_key)
                             token_refreshed = True
+                            time.sleep(2)
 
                 else:
                     logger.error("No access tokens for key {}. Authorize the user first.".format(wxt_token_key))
