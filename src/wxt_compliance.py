@@ -447,16 +447,22 @@ def check_events(check_interval=EVENT_CHECK_INTERVAL):
             if tokens is None or token_refreshed:
                 tokens = get_tokens_for_key(wxt_token_key)
                 if tokens:
-                    wxt_client = WebexTeamsAPI(access_token=tokens.access_token)
+                    token_ok = False
+                    while not token_ok:
+                        wxt_client = WebexTeamsAPI(access_token=tokens.access_token)
 
-                    try:
-                        user_info = wxt_client.people.me()
-                        logger.debug("Got user info: {}".format(user_info))
-                        wx_org_id = user_info.orgId
-                    except ApiError as e:
-                        logger.error("Me request error: {}".format(e))
+                        try:
+                            user_info = wxt_client.people.me()
+                            logger.debug("Got user info: {}".format(user_info))
+                            wx_org_id = user_info.orgId
+                            token_refreshed = False
+                            token_ok = True
+                        except ApiError as e:
+                            logger.error("Me request error: {}".format(e))
+                            refresh_tokens_for_key(wxt_token_key)
+                            tokens = get_tokens_for_key(wxt_token_key)
+                            token_refreshed = True
 
-                    token_refreshed = False
                 else:
                     logger.error("No access tokens for key {}. Authorize the user first.".format(wxt_token_key))
                     
