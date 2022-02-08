@@ -22,6 +22,7 @@ from flask import Flask, request, redirect, url_for, make_response
 import re
 import pysyslogclient
 import base64
+import unidecode
 
 import concurrent.futures
 import signal
@@ -543,7 +544,8 @@ def handle_event(event, wxt_client, syslog_list, syslog_facility, syslog_severit
         except Exception as e:
             logger.debug(f"Pop exception: {e}")
         # syslog_msg = "WEBEX_COMPLIANCE {} {} {} {} by {} JSON: {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0], json.dumps(event_data, separators=(",", ":")))
-        syslog_msg = "{}: {}".format(actor.emails[0], json.dumps(event_data, separators=(",", ":")))
+        syslog_msg_unicode = "{}: {}".format(actor.emails[0], json.dumps(event_data, separators=(",", ":"), ensure_ascii=False))
+        syslog_msg = unidecode.unidecode(syslog_msg_unicode)
         # logger.info("{} {} {} {} by {}".format(event.created, event.resource, event.type, event.data.personEmail, actor.emails[0]))
         logger.info(f"syslog message: {syslog_msg}")
         send_syslog(syslog_list, syslog_msg, process_name = "WEBEXCOMPLIANCE", facility = syslog_facility, severity = syslog_severity)
@@ -565,7 +567,8 @@ def handle_admin_event(admin_event, wxt_client, syslog_list, syslog_facility, sy
 
         audit_data = admin_event.data
         # syslog_msg = "WEBEX_ADMIN_AUDIT {} {} {} {} by {} JSON: {}".format(admin_event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail, json.dumps(admin_event.json_data))
-        syslog_msg = "{}: {}".format(audit_data.actorEmail, json.dumps(admin_event.json_data["data"]))
+        syslog_msg_unicode = "{}: {}".format(audit_data.actorEmail, json.dumps(admin_event.json_data["data"], ensure_ascii=False))
+        syslog_msg = unidecode.unidecode(syslog_msg_unicode)
         # logger.info("{} {} {} {} by {}".format(event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail))
         logger.info("admin audit event: {}".format(syslog_msg))
         send_syslog(syslog_list, syslog_msg, process_name = "WEBEXADMINAUDIT", facility = syslog_facility, severity = syslog_severity)
