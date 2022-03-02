@@ -567,7 +567,10 @@ def handle_admin_event(admin_event, wxt_client, syslog_list, syslog_facility, sy
 
         audit_data = admin_event.data
         # syslog_msg = "WEBEX_ADMIN_AUDIT {} {} {} {} by {} JSON: {}".format(admin_event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail, json.dumps(admin_event.json_data))
-        syslog_msg_unicode = "{}: {}".format(audit_data.actorEmail, json.dumps(admin_event.json_data["data"], ensure_ascii=False))
+        event_json = admin_event.json_data["data"]
+        time_stamp = datetime.utcnow().isoformat(timespec="milliseconds")+"Z"
+        event_json["wbxEventTime"] = admin_event.json_data.get("created", time_stamp)
+        syslog_msg_unicode = "{}: {}".format(audit_data.actorEmail, json.dumps(event_json, ensure_ascii=False))
         syslog_msg = unidecode.unidecode(syslog_msg_unicode)
         # logger.info("{} {} {} {} by {}".format(event.created, audit_data.eventCategory, audit_data.eventDescription, audit_data.actionText, audit_data.actorEmail))
         logger.info("admin audit event: {}".format(syslog_msg))
